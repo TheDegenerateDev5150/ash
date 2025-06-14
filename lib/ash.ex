@@ -404,6 +404,12 @@ defmodule Ash do
       type: :map,
       doc: "Context to set on each changeset"
     ],
+    private_arguments: [
+      type: :map,
+      default: %{},
+      doc:
+        "Private argument values to set on each changeset before validations and changes are run."
+    ],
     sorted?: [
       type: :boolean,
       default: false,
@@ -2002,7 +2008,7 @@ defmodule Ash do
   - [Read Actions Guide](/documentation/topics/actions/read-actions.md) for understanding read operations
   """
   @spec get!(Ash.Resource.t(), term(), Keyword.t()) ::
-          Ash.Resource.record() | no_return
+          Ash.Resource.record() | nil | no_return
   @doc spark_opts: [{2, @get_opts_schema}]
   def get!(resource, id, opts \\ []) do
     Ash.Helpers.expect_resource!(resource)
@@ -2050,7 +2056,7 @@ defmodule Ash do
   """
   @doc spark_opts: [{2, @get_opts_schema}]
   @spec get(Ash.Resource.t(), term(), Keyword.t()) ::
-          {:ok, Ash.Resource.record()} | {:error, term}
+          {:ok, Ash.Resource.record() | nil} | {:error, term}
   def get(resource, id, opts \\ []) do
     Ash.Helpers.expect_resource!(resource)
     Ash.Helpers.expect_options!(opts)
@@ -2363,11 +2369,12 @@ defmodule Ash do
             | :error
             | {:error, term}
             | :ok
-            | Ash.Page.page(),
+            | Ash.Page.page()
+            | nil,
           query :: load_statement(),
           opts :: Keyword.t()
         ) ::
-          Ash.Resource.record() | [Ash.Resource.record()] | no_return
+          Ash.Resource.record() | [Ash.Resource.record()] | nil | no_return
   @doc spark_opts: [{2, @load_opts_schema}]
   def load!(data, query, opts \\ []) do
     data
@@ -2411,11 +2418,11 @@ defmodule Ash do
   #{Spark.Options.docs(@load_opts_schema)}
   """
   @spec load(
-          record_or_records :: Ash.Resource.record() | [Ash.Resource.record()],
+          record_or_records :: Ash.Resource.record() | [Ash.Resource.record()] | nil,
           query :: load_statement(),
           opts :: Keyword.t()
         ) ::
-          {:ok, Ash.Resource.record() | [Ash.Resource.record()]} | {:error, term}
+          {:ok, Ash.Resource.record() | [Ash.Resource.record()] | nil} | {:error, term}
 
   @doc spark_opts: [{2, @load_opts_schema}]
   def load(data, query, opts \\ [])
