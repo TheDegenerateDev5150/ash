@@ -159,12 +159,19 @@ defmodule Ash.Changeset do
             concat("filter: ", to_doc(changeset.filter, opts))
         end
 
+      action =
+        if changeset.action do
+          concat("action: ", inspect(changeset.action && changeset.action.name))
+        else
+          empty()
+        end
+
       container_doc(
         "#Ash.Changeset<",
         [
           domain,
           concat("action_type: ", inspect(changeset.action_type)),
-          concat("action: ", inspect(changeset.action && changeset.action.name)),
+          action,
           tenant,
           concat("attributes: ", to_doc(changeset.attributes, opts)),
           atomics,
@@ -806,6 +813,7 @@ defmodule Ash.Changeset do
         |> Map.put(:no_atomic_constraints, opts[:no_atomic_constraints] || [])
         |> Map.put(:action_type, action.type)
         |> Map.put(:atomics, opts[:atomics] || [])
+        |> set_private_arguments_for_action(opts[:private_arguments] || %{})
         |> Ash.Changeset.set_tenant(opts[:tenant])
 
       {changeset, _opts} =
@@ -1129,41 +1137,47 @@ defmodule Ash.Changeset do
          context,
          where_condition \\ nil
        ) do
-    case List.wrap(
-           module.atomic(
-             changeset,
-             validation_opts,
-             struct(Ash.Resource.Validation.Context, Map.put(context, :message, message))
-           )
-         ) do
-      [{:atomic, _, _, _} | _] = atomics ->
-        Enum.reduce(atomics, changeset, fn
-          {:atomic, _fields, condition_expr, error_expr}, changeset ->
-            condition_expr =
-              if where_condition do
-                expr(^where_condition and ^condition_expr)
-              else
-                condition_expr
-              end
+    case module.init(validation_opts) do
+      {:ok, validation_opts} ->
+        case List.wrap(
+               module.atomic(
+                 changeset,
+                 validation_opts,
+                 struct(Ash.Resource.Validation.Context, Map.put(context, :message, message))
+               )
+             ) do
+          [{:atomic, _, _, _} | _] = atomics ->
+            Enum.reduce(atomics, changeset, fn
+              {:atomic, _fields, condition_expr, error_expr}, changeset ->
+                condition_expr =
+                  if where_condition do
+                    expr(^where_condition and ^condition_expr)
+                  else
+                    condition_expr
+                  end
 
-            condition_expr = rewrite_atomics(changeset, condition_expr)
+                condition_expr = rewrite_atomics(changeset, condition_expr)
 
-            validate_atomically(changeset, condition_expr, error_expr)
-        end)
+                validate_atomically(changeset, condition_expr, error_expr)
+            end)
 
-      [:ok] ->
-        changeset
+          [:ok] ->
+            changeset
 
-      [{:error, error}] ->
-        if message do
-          error = override_validation_message(error, message)
-          Ash.Changeset.add_error(changeset, error)
-        else
-          Ash.Changeset.add_error(changeset, error)
+          [{:error, error}] ->
+            if message do
+              error = override_validation_message(error, message)
+              Ash.Changeset.add_error(changeset, error)
+            else
+              Ash.Changeset.add_error(changeset, error)
+            end
+
+          [{:not_atomic, error}] ->
+            {:not_atomic, error}
         end
 
-      [{:not_atomic, error}] ->
-        {:not_atomic, error}
+      other ->
+        other
     end
   end
 
@@ -1771,7 +1785,7 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:create`, or a resource.
+            The first argument of `Ash.Changeset.for_create/2-4` must be a resource module.
 
             Got: #{inspect(other)}
             """
@@ -1886,7 +1900,10 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:update` or `:destroy`, or a record.
+            The first argument of `Ash.Changeset.for_update/2-4` must be one of:
+
+            - a record
+            - a changeset with an action_type `:destroy`.
 
             Got: #{inspect(other)}
             """
@@ -1966,7 +1983,10 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:destroy`, or a record.
+            The first argument of `Ash.Changeset.for_destroy/2-4` must be one of:
+
+            - a record
+            - a changeset with an action_type `:destroy`.
 
             Got: #{inspect(other)}
             """
@@ -2025,13 +2045,9 @@ defmodule Ash.Changeset do
 
                 Ash.Tracer.set_metadata(opts[:tracer], :changeset, metadata)
 
-                changeset =
-                  Enum.reduce(opts[:private_arguments] || %{}, changeset, fn {k, v}, changeset ->
-                    set_private_argument_for_action(changeset, k, v)
-                  end)
-
                 changeset
                 |> Map.put(:action, action)
+                |> set_private_arguments_for_action(opts[:private_arguments] || %{})
                 |> handle_errors(action.error_handler)
                 |> set_actor(opts)
                 |> set_authorize(opts)
@@ -2412,6 +2428,16 @@ defmodule Ash.Changeset do
         )
 
       if action do
+        # Validate that the action type matches what's expected for this changeset function
+        if action.type != changeset.action_type do
+          raise ArgumentError,
+            message: """
+            Action #{inspect(action.name)} is a #{inspect(action.type)} action, but we were expecting an #{inspect(changeset.action_type)} action.
+
+            Perhaps `#{inspect(changeset.resource)}.#{action.name}` is not an #{inspect(changeset.action_type)} action?
+            """
+        end
+
         name =
           fn ->
             "changeset:" <> Ash.Resource.Info.trace_name(changeset.resource) <> ":#{action.name}"
@@ -3090,6 +3116,12 @@ defmodule Ash.Changeset do
           )
         else
           case run_atomic_validation(changeset, change, context) do
+            {:error, error} ->
+              Ash.Changeset.add_error(
+                changeset,
+                error
+              )
+
             {:not_atomic, reason} ->
               Ash.Changeset.add_error(
                 changeset,
@@ -5839,6 +5871,13 @@ defmodule Ash.Changeset do
       value,
       "can't set public arguments with set_private_argument/3"
     )
+  end
+
+  @doc false
+  def set_private_arguments_for_action(changeset, arguments) do
+    Enum.reduce(arguments, changeset, fn {k, v}, changeset ->
+      set_private_argument_for_action(changeset, k, v)
+    end)
   end
 
   defp set_private_argument_for_action(changeset, argument, value) do

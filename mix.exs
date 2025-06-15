@@ -6,7 +6,7 @@ defmodule Ash.MixProject do
   A declarative, extensible framework for building Elixir applications.
   """
 
-  @version "3.5.15"
+  @version "3.5.20"
 
   def project do
     [
@@ -138,6 +138,7 @@ defmodule Ash.MixProject do
       ],
       skip_undefined_reference_warnings_on: [
         "CHANGELOG.md",
+        ".github/CONTRIBUTING.md",
         "documentation/topics/reference/glossary.md",
         "documentation/topics/development/upgrading-to-3.0.md"
       ],
@@ -366,7 +367,7 @@ defmodule Ash.MixProject do
   defp deps do
     [
       # DSLs
-      {:spark, "~> 2.1 and >= 2.2.61"},
+      {:spark, "~> 2.1 and >= 2.2.65"},
       # Ash resources are backed by ecto scheams
       {:ecto, "~> 3.7"},
       # Used by the ETS data layer
