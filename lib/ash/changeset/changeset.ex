@@ -159,12 +159,19 @@ defmodule Ash.Changeset do
             concat("filter: ", to_doc(changeset.filter, opts))
         end
 
+      action =
+        if changeset.action do
+          concat("action: ", inspect(changeset.action && changeset.action.name))
+        else
+          empty()
+        end
+
       container_doc(
         "#Ash.Changeset<",
         [
           domain,
           concat("action_type: ", inspect(changeset.action_type)),
-          concat("action: ", inspect(changeset.action && changeset.action.name)),
+          action,
           tenant,
           concat("attributes: ", to_doc(changeset.attributes, opts)),
           atomics,
@@ -806,6 +813,7 @@ defmodule Ash.Changeset do
         |> Map.put(:no_atomic_constraints, opts[:no_atomic_constraints] || [])
         |> Map.put(:action_type, action.type)
         |> Map.put(:atomics, opts[:atomics] || [])
+        |> set_private_arguments_for_action(opts[:private_arguments] || %{})
         |> Ash.Changeset.set_tenant(opts[:tenant])
 
       {changeset, _opts} =
@@ -1104,22 +1112,17 @@ defmodule Ash.Changeset do
 
   @doc false
   def run_atomic_validation(changeset, %{where: where} = validation, context) do
-    if Ash.DataLayer.data_layer_can?(changeset.resource, :expr_error) do
-      with {:atomic, condition} <- atomic_condition(where, changeset, context) do
-        case condition do
-          false ->
-            changeset
+    with {:atomic, condition} <- atomic_condition(where, changeset, context) do
+      case condition do
+        false ->
+          changeset
 
-          true ->
-            do_run_atomic_validation(changeset, validation, context)
+        true ->
+          do_run_atomic_validation(changeset, validation, context)
 
-          where_condition ->
-            do_run_atomic_validation(changeset, validation, context, where_condition)
-        end
+        where_condition ->
+          do_run_atomic_validation(changeset, validation, context, where_condition)
       end
-    else
-      {:not_atomic,
-       "data layer `#{Ash.DataLayer.data_layer(changeset.resource)}` does not support the expr_error"}
     end
   end
 
@@ -1129,41 +1132,47 @@ defmodule Ash.Changeset do
          context,
          where_condition \\ nil
        ) do
-    case List.wrap(
-           module.atomic(
-             changeset,
-             validation_opts,
-             struct(Ash.Resource.Validation.Context, Map.put(context, :message, message))
-           )
-         ) do
-      [{:atomic, _, _, _} | _] = atomics ->
-        Enum.reduce(atomics, changeset, fn
-          {:atomic, _fields, condition_expr, error_expr}, changeset ->
-            condition_expr =
-              if where_condition do
-                expr(^where_condition and ^condition_expr)
-              else
-                condition_expr
-              end
+    case module.init(validation_opts) do
+      {:ok, validation_opts} ->
+        case List.wrap(
+               module.atomic(
+                 changeset,
+                 validation_opts,
+                 struct(Ash.Resource.Validation.Context, Map.put(context, :message, message))
+               )
+             ) do
+          [{:atomic, _, _, _} | _] = atomics ->
+            Enum.reduce(atomics, changeset, fn
+              {:atomic, _fields, condition_expr, error_expr}, changeset ->
+                condition_expr =
+                  if where_condition do
+                    expr(^where_condition and ^condition_expr)
+                  else
+                    condition_expr
+                  end
 
-            condition_expr = rewrite_atomics(changeset, condition_expr)
+                condition_expr = rewrite_atomics(changeset, condition_expr)
 
-            validate_atomically(changeset, condition_expr, error_expr)
-        end)
+                validate_atomically(changeset, condition_expr, error_expr)
+            end)
 
-      [:ok] ->
-        changeset
+          [:ok] ->
+            changeset
 
-      [{:error, error}] ->
-        if message do
-          error = override_validation_message(error, message)
-          Ash.Changeset.add_error(changeset, error)
-        else
-          Ash.Changeset.add_error(changeset, error)
+          [{:error, error}] ->
+            if message do
+              error = override_validation_message(error, message)
+              Ash.Changeset.add_error(changeset, error)
+            else
+              Ash.Changeset.add_error(changeset, error)
+            end
+
+          [{:not_atomic, error}] ->
+            {:not_atomic, error}
         end
 
-      [{:not_atomic, error}] ->
-        {:not_atomic, error}
+      other ->
+        other
     end
   end
 
@@ -1376,10 +1385,82 @@ defmodule Ash.Changeset do
   defp atomic_with_changeset(other, _), do: other
 
   defp validate_atomically(changeset, condition_expr, error_expr) do
-    %{
-      changeset
-      | atomic_validations: [{condition_expr, error_expr} | changeset.atomic_validations]
-    }
+    condition_expr =
+      Ash.Expr.fill_template(
+        condition_expr,
+        source_context: changeset.context,
+        actor: changeset.context.private[:actor],
+        tenant: changeset.to_tenant,
+        args: changeset.arguments,
+        context: changeset.context,
+        changeset: changeset
+      )
+
+    error_expr =
+      Ash.Expr.fill_template(
+        error_expr,
+        source_context: changeset.context,
+        actor: changeset.context.private[:actor],
+        tenant: changeset.to_tenant,
+        args: changeset.arguments,
+        context: changeset.context,
+        changeset: changeset
+      )
+
+    case Ash.Expr.eval(condition_expr,
+           resource: changeset.resource,
+           unknown_on_unknown_refs?: true
+         ) do
+      {:ok, falsey} when falsey in [false, nil] ->
+        changeset
+
+      {:ok, _} ->
+        case Ash.Expr.eval(error_expr,
+               resource: changeset.resource,
+               unknown_on_unknown_refs?: true
+             ) do
+          {:ok, _} ->
+            changeset
+
+          {:error, error} ->
+            Ash.Changeset.add_error(changeset, error)
+
+          :unknown ->
+            if Ash.DataLayer.data_layer_can?(changeset.resource, :expr_error) do
+              %{
+                changeset
+                | atomic_validations: [
+                    {condition_expr, error_expr} | changeset.atomic_validations
+                  ]
+              }
+            else
+              {:not_atomic,
+               """
+               data layer `#{Ash.DataLayer.data_layer(changeset.resource)}` does not support the expr_error.
+
+               Validation #{inspect(error_expr)} with condition #{inspect(condition_expr)}
+               """}
+            end
+        end
+
+      :unknown ->
+        if Ash.DataLayer.data_layer_can?(changeset.resource, :expr_error) do
+          %{
+            changeset
+            | atomic_validations: [{condition_expr, error_expr} | changeset.atomic_validations]
+          }
+        else
+          {:not_atomic,
+           """
+           data layer `#{Ash.DataLayer.data_layer(changeset.resource)}` does not support the expr_error.
+
+           Validation #{inspect(error_expr)} with condition #{inspect(condition_expr)}
+           """}
+        end
+
+      {:error, error} ->
+        Ash.Changeset.add_error(changeset, error)
+    end
   end
 
   @doc """
@@ -1771,7 +1852,7 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:create`, or a resource.
+            The first argument of `Ash.Changeset.for_create/2-4` must be a resource module.
 
             Got: #{inspect(other)}
             """
@@ -1886,7 +1967,10 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:update` or `:destroy`, or a record.
+            The first argument of `Ash.Changeset.for_update/2-4` must be one of:
+
+            - a record
+            - a changeset with an action_type `:destroy`.
 
             Got: #{inspect(other)}
             """
@@ -1966,7 +2050,10 @@ defmodule Ash.Changeset do
         other ->
           raise ArgumentError,
             message: """
-            Initial must be a changeset with the action type of `:destroy`, or a record.
+            The first argument of `Ash.Changeset.for_destroy/2-4` must be one of:
+
+            - a record
+            - a changeset with an action_type `:destroy`.
 
             Got: #{inspect(other)}
             """
@@ -2025,13 +2112,9 @@ defmodule Ash.Changeset do
 
                 Ash.Tracer.set_metadata(opts[:tracer], :changeset, metadata)
 
-                changeset =
-                  Enum.reduce(opts[:private_arguments] || %{}, changeset, fn {k, v}, changeset ->
-                    set_private_argument_for_action(changeset, k, v)
-                  end)
-
                 changeset
                 |> Map.put(:action, action)
+                |> set_private_arguments_for_action(opts[:private_arguments] || %{})
                 |> handle_errors(action.error_handler)
                 |> set_actor(opts)
                 |> set_authorize(opts)
@@ -2412,6 +2495,16 @@ defmodule Ash.Changeset do
         )
 
       if action do
+        # Validate that the action type matches what's expected for this changeset function
+        if action.type != changeset.action_type do
+          raise ArgumentError,
+            message: """
+            Action #{inspect(action.name)} is a #{inspect(action.type)} action, but we were expecting an #{inspect(changeset.action_type)} action.
+
+            Perhaps `#{inspect(changeset.resource)}.#{action.name}` is not an #{inspect(changeset.action_type)} action?
+            """
+        end
+
         name =
           fn ->
             "changeset:" <> Ash.Resource.Info.trace_name(changeset.resource) <> ":#{action.name}"
@@ -3090,6 +3183,12 @@ defmodule Ash.Changeset do
           )
         else
           case run_atomic_validation(changeset, change, context) do
+            {:error, error} ->
+              Ash.Changeset.add_error(
+                changeset,
+                error
+              )
+
             {:not_atomic, reason} ->
               Ash.Changeset.add_error(
                 changeset,
@@ -5060,7 +5159,7 @@ defmodule Ash.Changeset do
       * `:error`  - an error is returned indicating that a record would have been updated
       * `:no_match` - follows the `on_no_match` instructions with these records
       * `:missing` - follows the `on_missing` instructions with these records
-      * `:unrelate` - the related item is not destroyed, but the data is "unrelated", making this behave like `remove_from_relationship/3`. The action should be:
+      * `:unrelate` - the related item is not destroyed, but the data is "unrelated". The action should be:
         * `many_to_many` - the join resource row is destroyed
         * `has_many` - the `destination_attribute` (on the related record) is set to `nil`
         * `has_one` - the `destination_attribute` (on the related record) is set to `nil`
@@ -5084,7 +5183,7 @@ defmodule Ash.Changeset do
       * `{:destroy, :action_name, :join_resource_action_name}` - the record is destroyed using the specified action on the destination resource,
         but first the join resource is destroyed with its specified action
       * `:error`  - an error is returned indicating that a record would have been updated
-      * `:unrelate` - the related item is not destroyed, but the data is "unrelated", making this behave like `remove_from_relationship/3`. The action should be:
+      * `:unrelate` - the related item is not destroyed, but the data is "unrelated". The action should be:
         * `many_to_many` - the join resource row is destroyed
         * `has_many` - the `destination_attribute` (on the related record) is set to `nil`
         * `has_one` - the `destination_attribute` (on the related record) is set to `nil`
@@ -5841,6 +5940,13 @@ defmodule Ash.Changeset do
     )
   end
 
+  @doc false
+  def set_private_arguments_for_action(changeset, arguments) do
+    Enum.reduce(arguments, changeset, fn {k, v}, changeset ->
+      set_private_argument_for_action(changeset, k, v)
+    end)
+  end
+
   defp set_private_argument_for_action(changeset, argument, value) do
     do_set_private_argument(
       changeset,
@@ -6258,20 +6364,26 @@ defmodule Ash.Changeset do
              {:ok, casted} <- handle_change(changeset, attribute, casted, constraints),
              {:ok, casted} <-
                Ash.Type.apply_constraints(attribute.type, casted, constraints) do
-          data_value =
-            if changeset.action_type != :create do
+          {data_value, has_data_value?} =
+            if changeset.action_type == :create do
+              {:ok, nil}
+            else
               case changeset.data do
+                %{__meta__: %{state: :built}} ->
+                  :error
+
                 %Ash.Changeset.OriginalDataNotAvailable{} ->
-                  nil
+                  :error
 
                 data ->
-                  Map.get(data, attribute.name)
+                  {:ok, Map.get(data, attribute.name)}
               end
             end
             |> case do
-              %Ash.ForbiddenField{} -> nil
-              %Ash.NotLoaded{} -> nil
-              v -> v
+              :error -> {nil, false}
+              {:ok, %Ash.ForbiddenField{}} -> {nil, false}
+              {:ok, %Ash.NotLoaded{}} -> {nil, false}
+              {:ok, v} -> {v, true}
             end
 
           cond do
@@ -6289,14 +6401,14 @@ defmodule Ash.Changeset do
                   defaults: changeset.defaults -- [attribute.name]
               }
 
-            is_nil(data_value) and is_nil(casted) ->
+            has_data_value? and is_nil(data_value) and is_nil(casted) ->
               %{
                 changeset
                 | attributes: Map.delete(changeset.attributes, attribute.name),
                   defaults: changeset.defaults -- [attribute.name]
               }
 
-            Ash.Type.equal?(attribute.type, casted, data_value) ->
+            has_data_value? and Ash.Type.equal?(attribute.type, casted, data_value) ->
               %{
                 changeset
                 | attributes: Map.delete(changeset.attributes, attribute.name),

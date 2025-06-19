@@ -322,6 +322,10 @@ defmodule Ash.Query do
         "#Ash.Query<",
         [
           concat("resource: ", inspect(query.resource)),
+          or_empty(
+            concat("action: ", inspect(query.action && query.action.name)),
+            not is_nil(query.action)
+          ),
           or_empty(concat("tenant: ", to_doc(query.to_tenant, opts)), tenant?),
           arguments(query, opts),
           # TODO: inspect these specially
@@ -521,7 +525,7 @@ defmodule Ash.Query do
   |> Ash.read!()
   ```
   """
-  @spec combination_of(t(), Ash.Query.Combination.t()) :: t()
+  @spec combination_of(t(), Ash.Query.Combination.t() | [Ash.Query.Combination.t()]) :: t()
   def combination_of(query, combinations) do
     query = new(query)
 
@@ -4256,6 +4260,7 @@ defmodule Ash.Query do
           end)
 
         base_query
+        |> Ash.Query.set_tenant(query.tenant)
         |> limit(combination.limit)
         |> offset(combination.offset)
         |> do_filter(combination.filter)
