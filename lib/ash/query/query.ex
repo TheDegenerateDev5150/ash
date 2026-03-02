@@ -452,10 +452,10 @@ defmodule Ash.Query do
 
   See `Ash.Filter` for more.
   """
-  def filter_input(query, filter) do
+  def filter_input(query, filter, opts \\ []) do
     query = new(query)
 
-    case Ash.Filter.parse_input(query.resource, filter) do
+    case Ash.Filter.parse_input(query.resource, filter, opts) do
       {:ok, filter} ->
         do_filter(query, filter)
 
