@@ -2826,6 +2826,7 @@ defmodule Ash.Filter do
   end
 
   defp transform_ref(%{ref_transformer: nil}, name), do: name
+
   defp transform_ref(%{ref_transformer: transformer, resource: resource}, name) do
     transformer.(resource, name) || name
   end
