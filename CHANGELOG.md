@@ -8,6 +8,19 @@ SPDX-License-Identifier: MIT
 
 <!-- changelog -->
 
+## [v3.19.1](https://github.com/ash-project/ash/compare/v3.19.0...v3.19.1) (2026-03-02)
+
+
+
+
+### Bug Fixes:
+
+* handle `{:not_atomic, ...}` branch in `Ash.Changeset` by [@zachdaniel](https://github.com/zachdaniel)
+
+### Improvements:
+
+* add a member name transformer for `Ash.Filter.parse_input` by [@zachdaniel](https://github.com/zachdaniel)
+
 ## [v3.19.0](https://github.com/ash-project/ash/compare/v3.18.0...v3.19.0) (2026-03-01)
 
 
